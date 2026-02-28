@@ -12,6 +12,8 @@ export interface WwwaxeOptions {
   keepClasses?: boolean
   /** Keep aria-hidden elements (default: false) */
   keepAriaHidden?: boolean
+  /** Convert HTML tags to markdown syntax for token efficiency (default: true) */
+  markdown?: boolean
 }
 
 /** Tags to remove entirely (tag + all children) */
@@ -26,6 +28,11 @@ const UNWRAP_TAGS = new Set([
   'span', 'div', 'font', 'center', 'b', 'i', 'u', 'em', 'strong', 'small',
   'big', 'mark', 'sub', 'sup', 'abbr', 'cite', 'code', 'kbd', 'samp', 'var',
   'del', 'ins', 's', 'strike', 'wbr', 'bdi', 'bdo',
+])
+
+/** Tags that should NOT be unwrapped when markdown mode is enabled (they survive for markdown rewriting) */
+const MARKDOWN_PRESERVE_TAGS = new Set([
+  'strong', 'b', 'em', 'i', 'code', 'del', 's', 'strike',
 ])
 
 /** Structural tags we always keep */
@@ -91,6 +98,20 @@ function isEventAttribute(name: string): boolean {
 
 function isDataAttribute(name: string): boolean {
   return name.startsWith('data-')
+}
+
+/**
+ * Get the effective UNWRAP_TAGS set based on markdown option
+ */
+function getUnwrapTags(options: WwwaxeOptions): Set<string> {
+  const markdown = options.markdown !== false
+  if (!markdown) return UNWRAP_TAGS
+  // When markdown is enabled, don't unwrap tags that the markdown rewriter needs
+  const tags = new Set(UNWRAP_TAGS)
+  for (const tag of MARKDOWN_PRESERVE_TAGS) {
+    tags.delete(tag)
+  }
+  return tags
 }
 
 /**
@@ -212,7 +233,7 @@ function hasContentAttributes(el: Element, options: WwwaxeOptions = {}): boolean
 /**
  * Process the DOM tree, stripping non-content nodes
  */
-function processNode(node: Node, options: WwwaxeOptions): void {
+function processNode(node: Node, options: WwwaxeOptions, unwrapTags: Set<string>): void {
   // Remove comments
   if (node.type === 'comment') {
     removeElement(node as ChildNode)
@@ -251,7 +272,7 @@ function processNode(node: Node, options: WwwaxeOptions): void {
     // Copy array since we may modify during iteration
     const children = [...getChildren(node)]
     for (const child of children) {
-      processNode(child, options)
+      processNode(child, options, unwrapTags)
     }
   }
 
@@ -261,7 +282,7 @@ function processNode(node: Node, options: WwwaxeOptions): void {
   // For tags not in KEEP_TAGS and not in UNWRAP_TAGS, decide based on whether
   // they have meaningful content
   if (!KEEP_TAGS.has(tag)) {
-    if (UNWRAP_TAGS.has(tag) && !hasContentAttributes(node, options)) {
+    if (unwrapTags.has(tag) && !hasContentAttributes(node, options)) {
       // Unwrap: replace element with its children (only if no meaningful attributes)
       unwrapElement(node)
       return
@@ -324,6 +345,164 @@ function unwrapElement(el: Element): void {
 }
 
 /**
+ * Replace an element with a text node in the DOM
+ */
+function replaceWithText(el: Element, text: string): void {
+  const parent = el.parentNode
+  if (!parent || !hasChildren(parent)) return
+
+  const textNode = new Text(text)
+  textNode.parent = parent
+
+  const parentChildren = getChildren(parent)
+  const index = parentChildren.indexOf(el)
+  if (index === -1) return
+
+  const mutableParent = parent as any
+  mutableParent.children = [
+    ...parentChildren.slice(0, index),
+    textNode,
+    ...parentChildren.slice(index + 1),
+  ]
+
+  // Fix prev/next links
+  const allChildren = getChildren(parent)
+  for (let i = 0; i < allChildren.length; i++) {
+    const child = allChildren[i] as any
+    child.prev = i > 0 ? allChildren[i - 1] : null
+    child.next = i < allChildren.length - 1 ? allChildren[i + 1] : null
+  }
+}
+
+/**
+ * Get the text content of a node (recursively), preserving any already-rewritten markdown text
+ */
+function getMdTextContent(node: Node): string {
+  if (isText(node)) return node.data
+  if (hasChildren(node)) {
+    return getChildren(node).map(getMdTextContent).join('')
+  }
+  return ''
+}
+
+/**
+ * Rewrite HTML tags to markdown syntax (bottom-up DOM pass)
+ */
+function markdownRewrite(node: Node): void {
+  if (!hasChildren(node) && !isTag(node)) return
+
+  // Process children first (bottom-up) so nested rewrites work
+  if (hasChildren(node)) {
+    const children = [...getChildren(node)]
+    for (const child of children) {
+      markdownRewrite(child)
+    }
+  }
+
+  if (!isTag(node)) return
+
+  const el = node as Element
+  const tag = el.tagName.toLowerCase()
+  const BACKTICK = String.fromCharCode(96)
+  const TRIPLE_BACKTICK = BACKTICK + BACKTICK + BACKTICK
+
+  switch (tag) {
+    case 'strong':
+    case 'b': {
+      const text = getMdTextContent(el)
+      replaceWithText(el, '**' + text + '**')
+      break
+    }
+    case 'em':
+    case 'i': {
+      const text = getMdTextContent(el)
+      replaceWithText(el, '*' + text + '*')
+      break
+    }
+    case 'del':
+    case 's':
+    case 'strike': {
+      const text = getMdTextContent(el)
+      replaceWithText(el, '~~' + text + '~~')
+      break
+    }
+    case 'a': {
+      const href = el.attribs.href || ''
+      const text = getMdTextContent(el)
+      replaceWithText(el, '[' + text + '](' + href + ')')
+      break
+    }
+    case 'img': {
+      const src = el.attribs.src || ''
+      const alt = el.attribs.alt || ''
+      replaceWithText(el, '![' + alt + '](' + src + ')')
+      break
+    }
+    case 'code': {
+      // Check if parent is <pre> — if so, skip (handled by pre)
+      const parent = el.parentNode
+      if (parent && isTag(parent) && parent.tagName.toLowerCase() === 'pre') {
+        break
+      }
+      const text = getMdTextContent(el)
+      replaceWithText(el, BACKTICK + text + BACKTICK)
+      break
+    }
+    case 'pre': {
+      // Get content — might be <pre><code>text</code></pre> or <pre>text</pre>
+      const children = getChildren(el)
+      let text: string
+      if (children.length === 1 && isTag(children[0]) && (children[0] as Element).tagName.toLowerCase() === 'code') {
+        text = getMdTextContent(children[0])
+      } else {
+        text = getMdTextContent(el)
+      }
+      replaceWithText(el, '\n' + TRIPLE_BACKTICK + '\n' + text + '\n' + TRIPLE_BACKTICK + '\n')
+      break
+    }
+    case 'h1':
+    case 'h2':
+    case 'h3':
+    case 'h4':
+    case 'h5':
+    case 'h6': {
+      const level = parseInt(tag[1])
+      const prefix = '#'.repeat(level)
+      const text = getMdTextContent(el)
+      replaceWithText(el, '\n' + prefix + ' ' + text + '\n')
+      break
+    }
+    case 'blockquote': {
+      const text = getMdTextContent(el).trim()
+      const lines = text.split('\n')
+      const quoted = lines.map((line: string) => '> ' + line).join('\n')
+      replaceWithText(el, quoted)
+      break
+    }
+    case 'ul': {
+      const items = getChildren(el).filter((c: Node) => isTag(c) && (c as Element).tagName.toLowerCase() === 'li')
+      const lines = items.map((item: Node) => '- ' + getMdTextContent(item).trim())
+      replaceWithText(el, lines.join('\n') + '\n')
+      break
+    }
+    case 'ol': {
+      const items = getChildren(el).filter((c: Node) => isTag(c) && (c as Element).tagName.toLowerCase() === 'li')
+      const lines = items.map((item: Node, i: number) => (i + 1) + '. ' + getMdTextContent(item).trim())
+      replaceWithText(el, lines.join('\n') + '\n')
+      break
+    }
+    case 'hr': {
+      replaceWithText(el, '\n---\n')
+      break
+    }
+    case 'br': {
+      replaceWithText(el, '\n')
+      break
+    }
+  }
+}
+
+/**
  * Collapse excessive whitespace in text nodes
  */
 function collapseWhitespace(node: Node): void {
@@ -365,6 +544,9 @@ function cleanTextNodes(node: Node): void {
  * and content while stripping scripts, styles, and presentational attributes.
  */
 export function wwwaxe(html: string, options: WwwaxeOptions = {}): string {
+  const markdown = options.markdown !== false
+  const unwrapTags = getUnwrapTags(options)
+
   // Parse HTML
   const doc = parseDocument(html, {
     decodeEntities: true,
@@ -373,18 +555,28 @@ export function wwwaxe(html: string, options: WwwaxeOptions = {}): string {
   // Process all top-level nodes
   const children = [...getChildren(doc)]
   for (const child of children) {
-    processNode(child, options)
+    processNode(child, options, unwrapTags)
   }
 
   // Collapse whitespace
   collapseWhitespace(doc)
   cleanTextNodes(doc)
 
+  // Markdown rewrite pass (after cleanup and whitespace collapse)
+  if (markdown) {
+    markdownRewrite(doc)
+  }
+
   // Serialize back to HTML
   let result = render(doc, {
     encodeEntities: 'utf8',
     selfClosingTags: true,
   })
+
+  // Fix markdown blockquote encoding (dom-serializer encodes > in text nodes)
+  if (markdown) {
+    result = result.replace(/&gt; /g, '> ')
+  }
 
   // Final cleanup: collapse multiple blank lines
   result = result.replace(/\n{3,}/g, '\n').trim()

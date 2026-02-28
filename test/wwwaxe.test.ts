@@ -70,14 +70,14 @@ describe('wwwaxe', () => {
 
     it('keeps href on links', () => {
       const html = '<a href="/about" class="nav-link text-blue-500">About</a>'
-      const result = wwwaxe(html)
+      const result = wwwaxe(html, { markdown: false })
       expect(result).toContain('href="/about"')
       expect(result).not.toContain('class')
     })
 
     it('keeps src and alt on images', () => {
       const html = '<img src="/photo.jpg" alt="A photo" class="rounded-lg" loading="lazy" width="800" height="600">'
-      const result = wwwaxe(html)
+      const result = wwwaxe(html, { markdown: false })
       expect(result).toContain('src="/photo.jpg"')
       expect(result).toContain('alt="A photo"')
       expect(result).not.toContain('class')
@@ -140,7 +140,7 @@ describe('wwwaxe', () => {
         </body>
         </html>
       `
-      const result = wwwaxe(html)
+      const result = wwwaxe(html, { markdown: false })
       expect(result).toContain('<header>')
       expect(result).toContain('<nav>')
       expect(result).toContain('<main>')
@@ -166,7 +166,7 @@ describe('wwwaxe', () => {
 
     it('preserves list structure', () => {
       const html = '<ul class="menu"><li class="item">One</li><li class="item">Two</li></ul>'
-      const result = wwwaxe(html)
+      const result = wwwaxe(html, { markdown: false })
       expect(result).toContain('<ul>')
       expect(result).toContain('<li>One</li>')
       expect(result).not.toContain('class')
@@ -232,7 +232,7 @@ describe('wwwaxe', () => {
 
     it('keeps img even without children', () => {
       const html = '<p><img src="/photo.jpg" alt="Photo"></p>'
-      const result = wwwaxe(html)
+      const result = wwwaxe(html, { markdown: false })
       expect(result).toContain('<img')
     })
   })
@@ -270,6 +270,173 @@ describe('wwwaxe', () => {
       const html = '<div><p>Visible</p><span aria-hidden="true">Icon text</span></div>'
       const result = wwwaxe(html, { keepAriaHidden: true })
       expect(result).toContain('Icon text')
+    })
+  })
+
+  describe('markdown rewrites', () => {
+    it('converts strong to **text**', () => {
+      const result = wwwaxe('<p>some <strong>bold</strong> text</p>')
+      expect(result).toContain('**bold**')
+      expect(result).not.toContain('<strong>')
+    })
+
+    it('converts b to **text**', () => {
+      const result = wwwaxe('<p>some <b>bold</b> text</p>')
+      expect(result).toContain('**bold**')
+      expect(result).not.toContain('<b>')
+    })
+
+    it('converts em to *text*', () => {
+      const result = wwwaxe('<p>some <em>italic</em> text</p>')
+      expect(result).toContain('*italic*')
+      expect(result).not.toContain('<em>')
+    })
+
+    it('converts i to *text*', () => {
+      const result = wwwaxe('<p>some <i>italic</i> text</p>')
+      expect(result).toContain('*italic*')
+      expect(result).not.toContain('<i>')
+    })
+
+    it('converts a to [text](href)', () => {
+      const result = wwwaxe('<a href="/about">About</a>')
+      expect(result).toBe('[About](/about)')
+    })
+
+    it('converts img to ![alt](src)', () => {
+      const result = wwwaxe('<img src="/photo.jpg" alt="A photo">')
+      expect(result).toBe('![A photo](/photo.jpg)')
+    })
+
+    it('converts img with no alt to ![](src)', () => {
+      const result = wwwaxe('<img src="/photo.jpg">')
+      expect(result).toBe('![](/photo.jpg)')
+    })
+
+    it('converts ul/li to - item', () => {
+      const result = wwwaxe('<ul><li>First</li><li>Second</li><li>Third</li></ul>')
+      expect(result).toContain('- First')
+      expect(result).toContain('- Second')
+      expect(result).toContain('- Third')
+    })
+
+    it('converts ol/li to numbered items', () => {
+      const result = wwwaxe('<ol><li>First</li><li>Second</li><li>Third</li></ol>')
+      expect(result).toContain('1. First')
+      expect(result).toContain('2. Second')
+      expect(result).toContain('3. Third')
+    })
+
+    it('converts h1 to # text', () => {
+      const result = wwwaxe('<h1>Title</h1>')
+      expect(result).toContain('# Title')
+      expect(result).not.toContain('<h1>')
+    })
+
+    it('converts h2 to ## text', () => {
+      const result = wwwaxe('<h2>Subtitle</h2>')
+      expect(result).toContain('## Subtitle')
+    })
+
+    it('converts h3 through h6', () => {
+      expect(wwwaxe('<h3>H3</h3>')).toContain('### H3')
+      expect(wwwaxe('<h4>H4</h4>')).toContain('#### H4')
+      expect(wwwaxe('<h5>H5</h5>')).toContain('##### H5')
+      expect(wwwaxe('<h6>H6</h6>')).toContain('###### H6')
+    })
+
+    it('converts blockquote to > text', () => {
+      const result = wwwaxe('<blockquote>quoted text</blockquote>')
+      expect(result).toContain('> quoted text')
+      expect(result).not.toContain('<blockquote>')
+    })
+
+    it('converts inline code to backtick-wrapped text', () => {
+      const result = wwwaxe('<p>use <code>npm install</code> to install</p>')
+      expect(result).toContain('`npm install`')
+      expect(result).not.toContain('<code>')
+    })
+
+    it('converts pre/code to fenced code block', () => {
+      const result = wwwaxe('<pre><code>const x = 1;</code></pre>')
+      expect(result).toContain('```')
+      expect(result).toContain('const x = 1;')
+      expect(result).not.toContain('<pre>')
+    })
+
+    it('converts pre without code to fenced code block', () => {
+      const result = wwwaxe('<pre>plain preformatted</pre>')
+      expect(result).toContain('```')
+      expect(result).toContain('plain preformatted')
+    })
+
+    it('converts hr to ---', () => {
+      const result = wwwaxe('<p>above</p><hr><p>below</p>')
+      expect(result).toContain('---')
+      expect(result).not.toContain('<hr')
+    })
+
+    it('converts br to newline', () => {
+      const result = wwwaxe('<p>Line1<br>Line2</p>')
+      expect(result).toContain('Line1\nLine2')
+      expect(result).not.toContain('<br')
+    })
+
+    it('converts del to ~~text~~', () => {
+      const result = wwwaxe('<p>some <del>deleted</del> text</p>')
+      expect(result).toContain('~~deleted~~')
+    })
+
+    it('converts s to ~~text~~', () => {
+      const result = wwwaxe('<p>some <s>struck</s> text</p>')
+      expect(result).toContain('~~struck~~')
+    })
+
+    it('converts strike to ~~text~~', () => {
+      const result = wwwaxe('<p>some <strike>struck</strike> text</p>')
+      expect(result).toContain('~~struck~~')
+    })
+
+    it('handles nested rewrites (bold link)', () => {
+      const result = wwwaxe('<p><strong><a href="/x">bold link</a></strong></p>')
+      expect(result).toContain('**[bold link](/x)**')
+    })
+
+    it('handles nested rewrites (italic in bold)', () => {
+      const result = wwwaxe('<p><strong>bold and <em>italic</em></strong></p>')
+      expect(result).toContain('**bold and *italic***')
+    })
+
+    it('markdown: false preserves HTML tags', () => {
+      const result = wwwaxe('<p>some <strong>bold</strong> text</p>', { markdown: false })
+      expect(result).not.toContain('**')
+      // strong gets unwrapped in non-markdown mode
+      expect(result).toContain('bold')
+      expect(result).toContain('<p>')
+    })
+
+    it('markdown: false preserves link HTML', () => {
+      const result = wwwaxe('<a href="/about">About</a>', { markdown: false })
+      expect(result).toContain('href="/about"')
+      expect(result).toContain('<a')
+    })
+
+    it('markdown: false preserves img HTML', () => {
+      const result = wwwaxe('<img src="/photo.jpg" alt="Photo">', { markdown: false })
+      expect(result).toContain('<img')
+      expect(result).toContain('src="/photo.jpg"')
+    })
+
+    it('markdown: false preserves heading HTML', () => {
+      const result = wwwaxe('<h1>Title</h1>', { markdown: false })
+      expect(result).toContain('<h1>')
+      expect(result).not.toContain('#')
+    })
+
+    it('markdown: false preserves list HTML', () => {
+      const result = wwwaxe('<ul><li>One</li><li>Two</li></ul>', { markdown: false })
+      expect(result).toContain('<ul>')
+      expect(result).toContain('<li>')
     })
   })
 
@@ -329,25 +496,24 @@ describe('wwwaxe', () => {
 
       const result = wwwaxe(html)
 
-      // Should keep structure
+      // Should keep structure (some tags preserved, some converted to markdown)
       expect(result).toContain('<nav>')
       expect(result).toContain('<main>')
       expect(result).toContain('<article>')
       expect(result).toContain('<footer>')
 
-      // Should keep content
+      // Should keep content (with markdown formatting)
       expect(result).toContain('Hello World')
       expect(result).toContain('blog post')
       expect(result).toContain('Section Two')
       expect(result).toContain('First item')
 
-      // Should keep links
-      expect(result).toContain('href="/about"')
-      expect(result).toContain('href="/post"')
+      // Links should be markdown format
+      expect(result).toContain('[About](/about)')
+      expect(result).toContain('[blog post](/post)')
 
-      // Should keep images
-      expect(result).toContain('src="/photo.jpg"')
-      expect(result).toContain('alt="A beautiful photo"')
+      // Images should be markdown format
+      expect(result).toContain('![A beautiful photo](/photo.jpg)')
 
       // Should keep meta
       expect(result).toContain('<title>My Blog Post</title>')
@@ -364,7 +530,7 @@ describe('wwwaxe', () => {
       expect(result).not.toContain('data-page')
       expect(result).not.toContain('generator')
 
-      // Should be significantly smaller
+      // Should be significantly smaller (markdown is even more compact)
       expect(result.length).toBeLessThan(html.length * 0.5)
 
       console.log('Input size:', html.length, 'bytes')
