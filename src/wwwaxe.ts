@@ -6,7 +6,7 @@ import { removeElement, textContent, getChildren } from 'domutils'
 export interface WwwaxeOptions {
   /** Keep data-* attributes (default: false) */
   keepDataAttributes?: boolean
-  /** Keep id attributes (default: false) */
+  /** Keep id attributes (default: true) */
   keepIds?: boolean
   /** Keep class attributes (default: false) */
   keepClasses?: boolean
@@ -14,6 +14,8 @@ export interface WwwaxeOptions {
   keepAriaHidden?: boolean
   /** Convert HTML tags to markdown syntax for token efficiency (default: true) */
   markdown?: boolean
+  /** Strip chrome (header, nav, footer, aside, dialog) and isolate core content (default: false) */
+  core?: boolean
 }
 
 /** Tags to remove entirely (tag + all children) */
@@ -89,6 +91,21 @@ const CONTENT_ATTRIBUTES = new Set([
   'start', 'reversed',
 ])
 
+/** Chrome tags to strip in core mode */
+const CHROME_TAGS = new Set([
+  'header', 'nav', 'footer', 'aside', 'dialog',
+])
+
+/** Chrome roles to strip in core mode */
+const CHROME_ROLES = new Set([
+  'banner', 'navigation', 'complementary', 'contentinfo', 'search',
+])
+
+/** Well-known IDs for main content fallback */
+const WELL_KNOWN_CONTENT_IDS = [
+  'main-content', 'content', 'main', 'page-content', 'site-content',
+]
+
 /** Event handler attribute prefixes */
 const EVENT_PREFIXES = ['on']
 
@@ -113,6 +130,297 @@ function getUnwrapTags(options: WwwaxeOptions): Set<string> {
   }
   return tags
 }
+
+// ─── Tree helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Find the first element matching a tag name (depth-first)
+ */
+function findElement(node: Node, tagName: string): Element | null {
+  if (isTag(node) && node.tagName.toLowerCase() === tagName) {
+    return node
+  }
+  if (hasChildren(node)) {
+    for (const child of getChildren(node)) {
+      const found = findElement(child, tagName)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+/**
+ * Find all elements matching a predicate (depth-first)
+ */
+function findElements(node: Node, predicate: (el: Element) => boolean): Element[] {
+  const results: Element[] = []
+  if (isTag(node) && predicate(node)) {
+    results.push(node)
+  }
+  if (hasChildren(node)) {
+    for (const child of getChildren(node)) {
+      results.push(...findElements(child, predicate))
+    }
+  }
+  return results
+}
+
+/**
+ * Find an element by id (depth-first)
+ */
+function findById(node: Node, id: string): Element | null {
+  if (isTag(node) && node.attribs.id === id) {
+    return node
+  }
+  if (hasChildren(node)) {
+    for (const child of getChildren(node)) {
+      const found = findById(child, id)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+// ─── Frontmatter ────────────────────────────────────────────────────────────
+
+interface FrontmatterData {
+  title?: string
+  description?: string
+  url?: string
+  image?: string
+}
+
+/**
+ * Extract frontmatter metadata from <head>.
+ * Must be called BEFORE processNode since processNode strips attributes like rel.
+ */
+function extractFrontmatter(doc: Document): FrontmatterData {
+  const data: FrontmatterData = {}
+
+  const head = findElement(doc, 'head')
+  if (!head) return data
+
+  // Title from <title> tag
+  const titleEl = findElement(head, 'title')
+  if (titleEl) {
+    const text = textContent(titleEl).trim()
+    if (text) data.title = text
+  }
+
+  // Walk head children for meta and link tags
+  const metas = findElements(head, (el) => el.tagName.toLowerCase() === 'meta')
+  const links = findElements(head, (el) => el.tagName.toLowerCase() === 'link')
+
+  // Description from <meta name="description">
+  for (const meta of metas) {
+    const name = (meta.attribs.name || '').toLowerCase()
+    if (name === 'description' && meta.attribs.content) {
+      data.description = meta.attribs.content.trim()
+      break
+    }
+  }
+
+  // URL: canonical link takes priority
+  for (const link of links) {
+    const rel = (link.attribs.rel || '').toLowerCase()
+    if (rel === 'canonical' && link.attribs.href) {
+      data.url = link.attribs.href.trim()
+      break
+    }
+  }
+
+  // URL fallback: og:url
+  if (!data.url) {
+    for (const meta of metas) {
+      const property = (meta.attribs.property || '').toLowerCase()
+      if (property === 'og:url' && meta.attribs.content) {
+        data.url = meta.attribs.content.trim()
+        break
+      }
+    }
+  }
+
+  // Image from og:image
+  for (const meta of metas) {
+    const property = (meta.attribs.property || '').toLowerCase()
+    if (property === 'og:image' && meta.attribs.content) {
+      data.image = meta.attribs.content.trim()
+      break
+    }
+  }
+
+  return data
+}
+
+/**
+ * Escape a YAML value if it contains special characters
+ */
+function yamlEscape(value: string): string {
+  // Wrap in double quotes if contains special YAML chars
+  if (
+    value.includes(': ') ||
+    value.includes('\n') ||
+    value.includes('"') ||
+    value.includes("'") ||
+    value.includes('[') ||
+    value.includes(']') ||
+    value.includes('{') ||
+    value.includes('}') ||
+    value.includes('#') ||
+    value.includes('&') ||
+    value.includes('*') ||
+    value.includes('!') ||
+    value.includes('|') ||
+    value.includes('>') ||
+    value.includes('%') ||
+    value.includes('@') ||
+    value.includes('`')
+  ) {
+    // Escape internal double quotes
+    const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    return '"' + escaped + '"'
+  }
+  return value
+}
+
+/**
+ * Build YAML frontmatter string from extracted data
+ */
+function buildFrontmatter(data: FrontmatterData): string {
+  const lines: string[] = []
+
+  if (data.title) lines.push('title: ' + yamlEscape(data.title))
+  if (data.description) lines.push('description: ' + yamlEscape(data.description))
+  if (data.url) lines.push('url: ' + yamlEscape(data.url))
+  if (data.image) lines.push('image: ' + yamlEscape(data.image))
+
+  if (lines.length === 0) return ''
+
+  return '---\n' + lines.join('\n') + '\n---'
+}
+
+// ─── Document wrapper removal ───────────────────────────────────────────────
+
+/**
+ * Remove <html>, <head>, <body> wrappers from the document.
+ * Unwraps body children to document level, removes head entirely.
+ */
+function removeDocumentWrappers(doc: Document): void {
+  // Find html element
+  const htmlEl = findElement(doc, 'html')
+  if (!htmlEl) return
+
+  const bodyEl = findElement(htmlEl, 'body')
+  const headEl = findElement(htmlEl, 'head')
+
+  // Remove head entirely
+  if (headEl) {
+    removeElement(headEl)
+  }
+
+  // Unwrap body — move its children up
+  if (bodyEl) {
+    unwrapElement(bodyEl)
+  }
+
+  // Unwrap html — move its children up
+  // Re-find since tree changed
+  const htmlEl2 = findElement(doc, 'html')
+  if (htmlEl2) {
+    unwrapElement(htmlEl2)
+  }
+}
+
+// ─── Core content / chrome stripping ────────────────────────────────────────
+
+/**
+ * Recursively remove chrome elements from a node
+ */
+function removeChromeElements(node: Node): void {
+  if (!hasChildren(node)) return
+
+  // Copy children since we modify during iteration
+  const children = [...getChildren(node)]
+  for (const child of children) {
+    if (isTag(child)) {
+      const tag = child.tagName.toLowerCase()
+      const role = (child.attribs.role || '').toLowerCase()
+
+      if (CHROME_TAGS.has(tag) || CHROME_ROLES.has(role)) {
+        removeElement(child)
+        continue
+      }
+    }
+    // Recurse into remaining children
+    removeChromeElements(child)
+  }
+}
+
+/**
+ * Find core content when no <main> or role="main" exists.
+ * Returns the element to use as the content root, or null.
+ */
+function findCoreContent(doc: Document): Element | null {
+  // 1. Try <article>
+  const article = findElement(doc, 'article')
+  if (article) return article
+
+  // 2. Try skip-to-content link target
+  const skipLinks = findElements(doc, (el) => {
+    if (el.tagName.toLowerCase() !== 'a') return false
+    const href = el.attribs.href || ''
+    if (!href.startsWith('#')) return false
+    const text = textContent(el).toLowerCase()
+    return text.includes('skip')
+  })
+  for (const link of skipLinks) {
+    const targetId = (link.attribs.href || '').slice(1)
+    if (targetId) {
+      const target = findById(doc, targetId)
+      if (target) return target
+    }
+  }
+
+  // 3. Try well-known IDs
+  for (const id of WELL_KNOWN_CONTENT_IDS) {
+    const el = findById(doc, id)
+    if (el) return el
+  }
+
+  return null
+}
+
+/**
+ * Strip chrome elements in core mode.
+ * If no <main> exists, try to identify core content via fallbacks.
+ */
+function stripChrome(doc: Document): void {
+  // First, strip all chrome elements recursively
+  removeChromeElements(doc)
+
+  // Check if <main> or role="main" exists
+  const mainEl = findElement(doc, 'main') ||
+    findElements(doc, (el) => (el.attribs.role || '').toLowerCase() === 'main')[0] || null
+
+  if (mainEl) {
+    // main exists — chrome is already stripped, we're good
+    return
+  }
+
+  // No main — try fallback content identification
+  const coreContent = findCoreContent(doc)
+  if (coreContent) {
+    // Replace document children with just the core content
+    const mutableDoc = doc as any
+    coreContent.parent = doc
+    mutableDoc.children = [coreContent]
+    // Fix prev/next
+    ;(coreContent as any).prev = null
+    ;(coreContent as any).next = null
+  }
+}
+
+// ─── Existing v1 helpers ────────────────────────────────────────────────────
 
 /**
  * Check if a meta tag contains useful content information
@@ -165,7 +473,7 @@ function stripAttributes(el: Element, options: WwwaxeOptions): void {
       continue
     }
     if (lowerKey === 'id') {
-      if (options.keepIds) { newAttribs[key] = value }
+      if (options.keepIds !== false) { newAttribs[key] = value }
       continue
     }
     if (isDataAttribute(lowerKey)) {
@@ -223,7 +531,7 @@ function hasContentAttributes(el: Element, options: WwwaxeOptions = {}): boolean
   for (const key of Object.keys(el.attribs)) {
     const lowerKey = key.toLowerCase()
     if (CONTENT_ATTRIBUTES.has(lowerKey)) return true
-    if (lowerKey === 'id' && options.keepIds) return true
+    if (lowerKey === 'id' && options.keepIds !== false) return true
     if (lowerKey === 'class' && options.keepClasses) return true
     if (isDataAttribute(lowerKey) && options.keepDataAttributes) return true
   }
@@ -547,39 +855,61 @@ export function wwwaxe(html: string, options: WwwaxeOptions = {}): string {
   const markdown = options.markdown !== false
   const unwrapTags = getUnwrapTags(options)
 
-  // Parse HTML
+  // 1. Parse HTML
   const doc = parseDocument(html, {
     decodeEntities: true,
   })
 
-  // Process all top-level nodes
+  // 2. Extract frontmatter from <head> (before processNode strips attributes)
+  const frontmatterData = extractFrontmatter(doc)
+
+  // 3. Process all top-level nodes (existing cleanup)
   const children = [...getChildren(doc)]
   for (const child of children) {
     processNode(child, options, unwrapTags)
   }
 
-  // Collapse whitespace
+  // 4. Remove document wrappers (html, head, body)
+  removeDocumentWrappers(doc)
+
+  // 5. If core: true, strip chrome
+  if (options.core) {
+    stripChrome(doc)
+  }
+
+  // 6. Collapse whitespace
   collapseWhitespace(doc)
+
+  // 7. Clean text nodes
   cleanTextNodes(doc)
 
-  // Markdown rewrite pass (after cleanup and whitespace collapse)
+  // 8. Markdown rewrite (if enabled)
   if (markdown) {
     markdownRewrite(doc)
   }
 
-  // Serialize back to HTML
+  // 9. Serialize
   let result = render(doc, {
     encodeEntities: 'utf8',
     selfClosingTags: true,
   })
 
-  // Fix markdown blockquote encoding (dom-serializer encodes > in text nodes)
+  // 10. Fix markdown blockquote encoding (dom-serializer encodes > in text nodes)
   if (markdown) {
     result = result.replace(/&gt; /g, '> ')
   }
 
-  // Final cleanup: collapse multiple blank lines
+  // 11. Strip DOCTYPE
+  result = result.replace(/<!DOCTYPE[^>]*>/gi, '')
+
+  // 12. Collapse multiple blank lines, trim
   result = result.replace(/\n{3,}/g, '\n').trim()
+
+  // 13. Prepend frontmatter
+  const frontmatter = buildFrontmatter(frontmatterData)
+  if (frontmatter) {
+    result = frontmatter + '\n' + result
+  }
 
   return result
 }

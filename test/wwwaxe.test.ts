@@ -62,9 +62,15 @@ describe('wwwaxe', () => {
       expect(result).toContain('Click')
     })
 
-    it('removes id attributes by default', () => {
+    it('keeps id attributes by default (v2 change)', () => {
       const html = '<div id="main-content"><p>Hello</p></div>'
       const result = wwwaxe(html)
+      expect(result).toContain('id="main-content"')
+    })
+
+    it('removes id attributes when keepIds is false', () => {
+      const html = '<div id="main-content"><p>Hello</p></div>'
+      const result = wwwaxe(html, { keepIds: false })
       expect(result).not.toContain('id=')
     })
 
@@ -192,24 +198,48 @@ describe('wwwaxe', () => {
     })
   })
 
-  describe('meta information', () => {
-    it('keeps title tag', () => {
+  describe('meta information / frontmatter', () => {
+    it('extracts title to YAML frontmatter', () => {
       const html = '<html><head><title>My Page</title></head><body><p>Hi</p></body></html>'
       const result = wwwaxe(html)
-      expect(result).toContain('<title>My Page</title>')
+      expect(result).toContain('---')
+      expect(result).toContain('title: My Page')
+      expect(result).not.toContain('<title>')
+      expect(result).not.toContain('<head>')
+      expect(result).toContain('<p>Hi</p>')
     })
 
-    it('keeps description meta', () => {
+    it('extracts description to frontmatter', () => {
       const html = '<html><head><meta name="description" content="A great page"></head><body><p>Hi</p></body></html>'
       const result = wwwaxe(html)
-      expect(result).toContain('description')
-      expect(result).toContain('A great page')
+      expect(result).toContain('description: A great page')
     })
 
-    it('keeps og: meta tags', () => {
-      const html = '<html><head><meta property="og:title" content="My Title"></head><body><p>Hi</p></body></html>'
+    it('extracts og:image to frontmatter', () => {
+      const html = '<html><head><meta property="og:image" content="https://example.com/img.png"><meta property="og:title" content="My Title"></head><body><p>Hi</p></body></html>'
       const result = wwwaxe(html)
-      expect(result).toContain('og:title')
+      expect(result).toContain('image: https://example.com/img.png')
+      // og:title is not extracted (we use <title> tag for title)
+      expect(result).not.toContain('og:title')
+    })
+
+    it('extracts canonical URL to frontmatter', () => {
+      const html = '<html><head><link rel="canonical" href="https://example.com/page"></head><body><p>Hi</p></body></html>'
+      const result = wwwaxe(html)
+      expect(result).toContain('url: https://example.com/page')
+    })
+
+    it('extracts og:url when no canonical link', () => {
+      const html = '<html><head><meta property="og:url" content="https://example.com/page"></head><body><p>Hi</p></body></html>'
+      const result = wwwaxe(html)
+      expect(result).toContain('url: https://example.com/page')
+    })
+
+    it('canonical URL takes priority over og:url', () => {
+      const html = '<html><head><link rel="canonical" href="https://example.com/canonical"><meta property="og:url" content="https://example.com/og"></head><body><p>Hi</p></body></html>'
+      const result = wwwaxe(html)
+      expect(result).toContain('url: https://example.com/canonical')
+      expect(result).not.toContain('og')
     })
 
     it('removes non-useful meta tags', () => {
@@ -217,6 +247,30 @@ describe('wwwaxe', () => {
       const result = wwwaxe(html)
       expect(result).not.toContain('generator')
       expect(result).toContain('description')
+    })
+
+    it('produces no frontmatter when head has no extractable data', () => {
+      const html = '<html><head><meta charset="utf-8"></head><body><p>Hi</p></body></html>'
+      const result = wwwaxe(html)
+      expect(result).not.toContain('---')
+      expect(result).toContain('<p>Hi</p>')
+    })
+
+    it('removes html/head/body wrappers from output', () => {
+      const html = '<html><head><title>Test</title></head><body><p>Content</p></body></html>'
+      const result = wwwaxe(html)
+      expect(result).not.toContain('<html')
+      expect(result).not.toContain('<head')
+      expect(result).not.toContain('<body')
+      expect(result).not.toContain('</html>')
+      expect(result).not.toContain('</head>')
+      expect(result).not.toContain('</body>')
+    })
+
+    it('YAML-escapes values with colons', () => {
+      const html = '<html><head><title>Part 1: The Beginning</title></head><body><p>Hi</p></body></html>'
+      const result = wwwaxe(html)
+      expect(result).toContain('title: "Part 1: The Beginning"')
     })
   })
 
@@ -270,6 +324,101 @@ describe('wwwaxe', () => {
       const html = '<div><p>Visible</p><span aria-hidden="true">Icon text</span></div>'
       const result = wwwaxe(html, { keepAriaHidden: true })
       expect(result).toContain('Icon text')
+    })
+  })
+
+  describe('core mode', () => {
+    it('strips header elements', () => {
+      const html = '<header><nav><a href="/">Home</a></nav></header><main><p>Content</p></main>'
+      const result = wwwaxe(html, { core: true })
+      expect(result).not.toContain('<header')
+      expect(result).not.toContain('<nav')
+      expect(result).toContain('Content')
+    })
+
+    it('strips footer elements', () => {
+      const html = '<main><p>Content</p></main><footer><p>Copyright</p></footer>'
+      const result = wwwaxe(html, { core: true })
+      expect(result).not.toContain('<footer')
+      expect(result).not.toContain('Copyright')
+      expect(result).toContain('Content')
+    })
+
+    it('strips aside elements', () => {
+      const html = '<main><p>Content</p></main><aside><p>Sidebar</p></aside>'
+      const result = wwwaxe(html, { core: true })
+      expect(result).not.toContain('<aside')
+      expect(result).not.toContain('Sidebar')
+      expect(result).toContain('Content')
+    })
+
+    it('strips dialog elements', () => {
+      const html = '<main><p>Content</p></main><dialog><p>Modal</p></dialog>'
+      const result = wwwaxe(html, { core: true })
+      expect(result).not.toContain('<dialog')
+      expect(result).not.toContain('Modal')
+      expect(result).toContain('Content')
+    })
+
+    it('strips elements with chrome roles', () => {
+      const html = '<div role="banner"><p>Banner</p></div><div role="navigation"><a href="/">Nav</a></div><main><p>Content</p></main><div role="contentinfo"><p>Footer</p></div>'
+      const result = wwwaxe(html, { core: true })
+      expect(result).not.toContain('Banner')
+      expect(result).not.toContain('role="navigation"')
+      expect(result).not.toContain('Footer')
+      expect(result).toContain('Content')
+    })
+
+    it('strips role="search" elements', () => {
+      const html = '<div role="search"><input type="text"></div><main><p>Content</p></main>'
+      const result = wwwaxe(html, { core: true })
+      expect(result).not.toContain('role="search"')
+      expect(result).toContain('Content')
+    })
+
+    it('strips role="complementary" elements', () => {
+      const html = '<main><p>Content</p></main><div role="complementary"><p>Related</p></div>'
+      const result = wwwaxe(html, { core: true })
+      expect(result).not.toContain('Related')
+      expect(result).toContain('Content')
+    })
+
+    it('preserves main content when chrome is stripped', () => {
+      const html = `
+        <header><nav><a href="/">Home</a></nav></header>
+        <main>
+          <article>
+            <h1>Article Title</h1>
+            <p>Article content here.</p>
+          </article>
+        </main>
+        <aside><p>Sidebar</p></aside>
+        <footer><p>Copyright</p></footer>
+      `
+      const result = wwwaxe(html, { core: true })
+      expect(result).toContain('Article Title')
+      expect(result).toContain('Article content here')
+      expect(result).not.toContain('<header')
+      expect(result).not.toContain('<nav')
+      expect(result).not.toContain('<aside')
+      expect(result).not.toContain('<footer')
+      expect(result).not.toContain('Sidebar')
+      expect(result).not.toContain('Copyright')
+    })
+
+    it('does not strip chrome when core is false', () => {
+      const html = '<header><nav><a href="/">Home</a></nav></header><main><p>Content</p></main><footer><p>Footer</p></footer>'
+      const result = wwwaxe(html, { core: false, markdown: false })
+      expect(result).toContain('<header>')
+      expect(result).toContain('<nav>')
+      expect(result).toContain('<footer>')
+    })
+
+    it('strips nested nav inside non-chrome elements', () => {
+      const html = '<main><p>Content</p><nav><a href="/other">Other</a></nav></main>'
+      const result = wwwaxe(html, { core: true })
+      expect(result).not.toContain('<nav')
+      expect(result).toContain('Content')
     })
   })
 
@@ -496,8 +645,19 @@ describe('wwwaxe', () => {
 
       const result = wwwaxe(html)
 
+      // Should have frontmatter
+      expect(result).toMatch(/^---\n/)
+      expect(result).toContain('title: My Blog Post')
+      expect(result).toContain('description: A great article about coding')
+      expect(result).toContain('url: https://example.com/blog/post')
+
+      // Should NOT have html/head/body wrappers
+      expect(result).not.toContain('<html')
+      expect(result).not.toContain('<head')
+      expect(result).not.toContain('<body')
+
       // Should keep structure (some tags preserved, some converted to markdown)
-      expect(result).toContain('<nav>')
+      expect(result).toContain('<nav')
       expect(result).toContain('<main>')
       expect(result).toContain('<article>')
       expect(result).toContain('<footer>')
@@ -514,10 +674,6 @@ describe('wwwaxe', () => {
 
       // Images should be markdown format
       expect(result).toContain('![A beautiful photo](/photo.jpg)')
-
-      // Should keep meta
-      expect(result).toContain('<title>My Blog Post</title>')
-      expect(result).toContain('A great article about coding')
 
       // Should strip
       expect(result).not.toContain('<script')
@@ -536,6 +692,45 @@ describe('wwwaxe', () => {
       console.log('Input size:', html.length, 'bytes')
       console.log('Output size:', result.length, 'bytes')
       console.log('Reduction:', Math.round((1 - result.length / html.length) * 100) + '%')
+    })
+
+    it('handles a typical blog page with core mode', () => {
+      const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>My Blog Post</title>
+  <meta name="description" content="A great article about coding">
+  <link rel="canonical" href="https://example.com/blog/post">
+</head>
+<body>
+  <header><nav><a href="/">Home</a><a href="/about">About</a></nav></header>
+  <main>
+    <article>
+      <h1>Hello World</h1>
+      <p>This is my blog post.</p>
+    </article>
+  </main>
+  <aside><p>Sidebar content</p></aside>
+  <footer><p>Copyright 2024</p></footer>
+</body>
+</html>`
+
+      const result = wwwaxe(html, { core: true })
+
+      // Should have frontmatter
+      expect(result).toContain('title: My Blog Post')
+
+      // Should strip chrome
+      expect(result).not.toContain('<header')
+      expect(result).not.toContain('<nav')
+      expect(result).not.toContain('<aside')
+      expect(result).not.toContain('<footer')
+      expect(result).not.toContain('Sidebar')
+      expect(result).not.toContain('Copyright')
+
+      // Should keep main content
+      expect(result).toContain('Hello World')
+      expect(result).toContain('blog post')
     })
   })
 })
