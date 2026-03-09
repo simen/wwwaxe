@@ -27,14 +27,12 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// src/index.ts
-var index_exports = {};
-__export(index_exports, {
+// src/wwwaxe.ts
+var wwwaxe_exports = {};
+__export(wwwaxe_exports, {
   wwwaxe: () => wwwaxe
 });
-module.exports = __toCommonJS(index_exports);
-
-// src/wwwaxe.ts
+module.exports = __toCommonJS(wwwaxe_exports);
 var import_htmlparser2 = require("htmlparser2");
 var import_domhandler = require("domhandler");
 var import_dom_serializer = __toESM(require("dom-serializer"));
@@ -234,11 +232,16 @@ var CONTENT_ATTRIBUTES = /* @__PURE__ */ new Set([
   "reversed"
 ]);
 var CHROME_TAGS = /* @__PURE__ */ new Set([
-  "header",
   "nav",
   "footer",
   "aside",
   "dialog"
+]);
+var SECTIONING_TAGS = /* @__PURE__ */ new Set([
+  "section",
+  "article",
+  "main",
+  "aside"
 ]);
 var CHROME_ROLES = /* @__PURE__ */ new Set([
   "banner",
@@ -380,6 +383,55 @@ function removeDocumentWrappers(doc) {
     unwrapElement(htmlEl2);
   }
 }
+function reassembleRSCPayloads(doc) {
+  const templates = findElements(doc, (el) => {
+    if (el.tagName.toLowerCase() !== "template") return false;
+    const id = el.attribs.id || "";
+    return /^B:\d+$/.test(id);
+  });
+  if (templates.length === 0) return;
+  for (const tmpl of templates) {
+    const boundaryId = tmpl.attribs.id;
+    const slotNum = boundaryId.slice(2);
+    const slotId = "S:" + slotNum;
+    const hiddenDiv = findById(doc, slotId);
+    if (!hiddenDiv) continue;
+    const parent = tmpl.parentNode;
+    if (!parent || !(0, import_domhandler.hasChildren)(parent)) continue;
+    const prevNode = tmpl.prev;
+    if (prevNode && prevNode.type === "comment" && prevNode.data === "$?") {
+      (0, import_domutils.removeElement)(prevNode);
+    }
+    const nextNode = tmpl.next;
+    if (nextNode && nextNode.type === "comment" && nextNode.data === "/$") {
+      (0, import_domutils.removeElement)(nextNode);
+    }
+    const slotChildren = [...(0, import_domutils.getChildren)(hiddenDiv)];
+    if (slotChildren.length > 0) {
+      const parentChildren = (0, import_domutils.getChildren)(parent);
+      const tmplIndex = parentChildren.indexOf(tmpl);
+      if (tmplIndex === -1) continue;
+      for (const child of slotChildren) {
+        child.parent = parent;
+      }
+      const mutableParent = parent;
+      mutableParent.children = [
+        ...parentChildren.slice(0, tmplIndex),
+        ...slotChildren,
+        ...parentChildren.slice(tmplIndex + 1)
+      ];
+      const allChildren = (0, import_domutils.getChildren)(parent);
+      for (let i = 0; i < allChildren.length; i++) {
+        const child = allChildren[i];
+        child.prev = i > 0 ? allChildren[i - 1] : null;
+        child.next = i < allChildren.length - 1 ? allChildren[i + 1] : null;
+      }
+    } else {
+      (0, import_domutils.removeElement)(tmpl);
+    }
+    (0, import_domutils.removeElement)(hiddenDiv);
+  }
+}
 function removeChromeElements(node) {
   if (!(0, import_domhandler.hasChildren)(node)) return;
   const children = [...(0, import_domutils.getChildren)(node)];
@@ -390,6 +442,13 @@ function removeChromeElements(node) {
       if (CHROME_TAGS.has(tag) || CHROME_ROLES.has(role)) {
         (0, import_domutils.removeElement)(child);
         continue;
+      }
+      if (tag === "header") {
+        const isInsideSectioning = node && (0, import_domhandler.isTag)(node) && SECTIONING_TAGS.has(node.tagName.toLowerCase());
+        if (!isInsideSectioning) {
+          (0, import_domutils.removeElement)(child);
+          continue;
+        }
       }
     }
     removeChromeElements(child);
@@ -422,7 +481,10 @@ function stripChrome(doc) {
   removeChromeElements(doc);
   const mainEl = findElement(doc, "main") || findElements(doc, (el) => (el.attribs.role || "").toLowerCase() === "main")[0] || null;
   if (mainEl) {
-    return;
+    const mainText = (0, import_domutils.textContent)(mainEl).trim();
+    if (mainText.length > 50) {
+      return;
+    }
   }
   const coreContent = findCoreContent(doc);
   if (coreContent) {
@@ -752,6 +814,7 @@ function wwwaxe(html, options = {}) {
     decodeEntities: true
   });
   const frontmatterData = extractFrontmatter(doc);
+  reassembleRSCPayloads(doc);
   const children = [...(0, import_domutils.getChildren)(doc)];
   for (const child of children) {
     processNode(child, options, unwrapTags);

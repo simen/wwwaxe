@@ -198,11 +198,16 @@ var CONTENT_ATTRIBUTES = /* @__PURE__ */ new Set([
   "reversed"
 ]);
 var CHROME_TAGS = /* @__PURE__ */ new Set([
-  "header",
   "nav",
   "footer",
   "aside",
   "dialog"
+]);
+var SECTIONING_TAGS = /* @__PURE__ */ new Set([
+  "section",
+  "article",
+  "main",
+  "aside"
 ]);
 var CHROME_ROLES = /* @__PURE__ */ new Set([
   "banner",
@@ -344,6 +349,55 @@ function removeDocumentWrappers(doc) {
     unwrapElement(htmlEl2);
   }
 }
+function reassembleRSCPayloads(doc) {
+  const templates = findElements(doc, (el) => {
+    if (el.tagName.toLowerCase() !== "template") return false;
+    const id = el.attribs.id || "";
+    return /^B:\d+$/.test(id);
+  });
+  if (templates.length === 0) return;
+  for (const tmpl of templates) {
+    const boundaryId = tmpl.attribs.id;
+    const slotNum = boundaryId.slice(2);
+    const slotId = "S:" + slotNum;
+    const hiddenDiv = findById(doc, slotId);
+    if (!hiddenDiv) continue;
+    const parent = tmpl.parentNode;
+    if (!parent || !hasChildren(parent)) continue;
+    const prevNode = tmpl.prev;
+    if (prevNode && prevNode.type === "comment" && prevNode.data === "$?") {
+      removeElement(prevNode);
+    }
+    const nextNode = tmpl.next;
+    if (nextNode && nextNode.type === "comment" && nextNode.data === "/$") {
+      removeElement(nextNode);
+    }
+    const slotChildren = [...getChildren(hiddenDiv)];
+    if (slotChildren.length > 0) {
+      const parentChildren = getChildren(parent);
+      const tmplIndex = parentChildren.indexOf(tmpl);
+      if (tmplIndex === -1) continue;
+      for (const child of slotChildren) {
+        child.parent = parent;
+      }
+      const mutableParent = parent;
+      mutableParent.children = [
+        ...parentChildren.slice(0, tmplIndex),
+        ...slotChildren,
+        ...parentChildren.slice(tmplIndex + 1)
+      ];
+      const allChildren = getChildren(parent);
+      for (let i = 0; i < allChildren.length; i++) {
+        const child = allChildren[i];
+        child.prev = i > 0 ? allChildren[i - 1] : null;
+        child.next = i < allChildren.length - 1 ? allChildren[i + 1] : null;
+      }
+    } else {
+      removeElement(tmpl);
+    }
+    removeElement(hiddenDiv);
+  }
+}
 function removeChromeElements(node) {
   if (!hasChildren(node)) return;
   const children = [...getChildren(node)];
@@ -354,6 +408,13 @@ function removeChromeElements(node) {
       if (CHROME_TAGS.has(tag) || CHROME_ROLES.has(role)) {
         removeElement(child);
         continue;
+      }
+      if (tag === "header") {
+        const isInsideSectioning = node && isTag(node) && SECTIONING_TAGS.has(node.tagName.toLowerCase());
+        if (!isInsideSectioning) {
+          removeElement(child);
+          continue;
+        }
       }
     }
     removeChromeElements(child);
@@ -386,7 +447,10 @@ function stripChrome(doc) {
   removeChromeElements(doc);
   const mainEl = findElement(doc, "main") || findElements(doc, (el) => (el.attribs.role || "").toLowerCase() === "main")[0] || null;
   if (mainEl) {
-    return;
+    const mainText = textContent(mainEl).trim();
+    if (mainText.length > 50) {
+      return;
+    }
   }
   const coreContent = findCoreContent(doc);
   if (coreContent) {
@@ -716,6 +780,7 @@ function wwwaxe(html, options = {}) {
     decodeEntities: true
   });
   const frontmatterData = extractFrontmatter(doc);
+  reassembleRSCPayloads(doc);
   const children = [...getChildren(doc)];
   for (const child of children) {
     processNode(child, options, unwrapTags);

@@ -93,7 +93,12 @@ const CONTENT_ATTRIBUTES = new Set([
 
 /** Chrome tags to strip in core mode */
 const CHROME_TAGS = new Set([
-  'header', 'nav', 'footer', 'aside', 'dialog',
+  'nav', 'footer', 'aside', 'dialog',
+])
+
+/** Sectioning elements whose child <header> is content, not chrome */
+const SECTIONING_TAGS = new Set([
+  'section', 'article', 'main', 'aside',
 ])
 
 /** Chrome roles to strip in core mode */
@@ -331,6 +336,95 @@ function removeDocumentWrappers(doc: Document): void {
   }
 }
 
+// ─── RSC Streaming Reassembly ───────────────────────────────────────────────
+
+/**
+ * Reassemble React Server Components streaming payloads.
+ *
+ * RSC streaming pages render Suspense boundaries as `<template id="B:N">`
+ * placeholders inside `<main>`, with the actual content in hidden
+ * `<div hidden id="S:N">` elements later in the document. React's client JS
+ * moves S:N content into B:N slots. This function performs that reassembly
+ * so wwwaxe can see the real content before processNode strips hidden
+ * elements and templates.
+ *
+ * For each B:N / S:N pair:
+ * 1. Insert the hidden div's children where the template was
+ * 2. Remove the surrounding `<!--$?-->` and `<!--/$-->` comment markers
+ * 3. Remove the template element
+ * 4. Remove the hidden div
+ */
+function reassembleRSCPayloads(doc: Document): void {
+  // Find all <template> elements whose id matches B:N (N = one or more digits)
+  const templates = findElements(doc, (el) => {
+    if (el.tagName.toLowerCase() !== 'template') return false
+    const id = el.attribs.id || ''
+    return /^B:\d+$/.test(id)
+  })
+
+  if (templates.length === 0) return
+
+  for (const tmpl of templates) {
+    const boundaryId = tmpl.attribs.id // e.g. "B:0"
+    const slotNum = boundaryId.slice(2)  // e.g. "0"
+    const slotId = 'S:' + slotNum        // e.g. "S:0"
+
+    // Find the corresponding hidden div
+    const hiddenDiv = findById(doc, slotId)
+    if (!hiddenDiv) continue
+
+    const parent = tmpl.parentNode
+    if (!parent || !hasChildren(parent)) continue
+
+    // --- Remove surrounding Suspense boundary comment nodes ---
+    // <!--$?--> immediately before the template
+    const prevNode = (tmpl as any).prev as Node | null
+    if (prevNode && prevNode.type === 'comment' && (prevNode as Comment).data === '$?') {
+      removeElement(prevNode as ChildNode)
+    }
+    // <!--/$--> immediately after the template
+    const nextNode = (tmpl as any).next as Node | null
+    if (nextNode && nextNode.type === 'comment' && (nextNode as Comment).data === '/$') {
+      removeElement(nextNode as ChildNode)
+    }
+
+    // --- Move hidden div's children to where the template is ---
+    const slotChildren = [...getChildren(hiddenDiv)]
+    if (slotChildren.length > 0) {
+      const parentChildren = getChildren(parent)
+      const tmplIndex = parentChildren.indexOf(tmpl)
+      if (tmplIndex === -1) continue
+
+      // Re-parent slot children
+      for (const child of slotChildren) {
+        child.parent = parent
+      }
+
+      // Splice: insert slot children in place of the template
+      const mutableParent = parent as any
+      mutableParent.children = [
+        ...parentChildren.slice(0, tmplIndex),
+        ...slotChildren,
+        ...parentChildren.slice(tmplIndex + 1),
+      ]
+
+      // Fix prev/next sibling links
+      const allChildren = getChildren(parent)
+      for (let i = 0; i < allChildren.length; i++) {
+        const child = allChildren[i] as any
+        child.prev = i > 0 ? allChildren[i - 1] : null
+        child.next = i < allChildren.length - 1 ? allChildren[i + 1] : null
+      }
+    } else {
+      // No children in slot — just remove the template
+      removeElement(tmpl)
+    }
+
+    // --- Remove the hidden div entirely ---
+    removeElement(hiddenDiv)
+  }
+}
+
 // ─── Core content / chrome stripping ────────────────────────────────────────
 
 /**
@@ -349,6 +443,17 @@ function removeChromeElements(node: Node): void {
       if (CHROME_TAGS.has(tag) || CHROME_ROLES.has(role)) {
         removeElement(child)
         continue
+      }
+
+      // <header> is chrome only when it's page-level (not inside a sectioning element).
+      // HTML5 allows <header> inside <section>/<article>/<main> as a section header.
+      if (tag === 'header') {
+        const isInsideSectioning = node && isTag(node) &&
+          SECTIONING_TAGS.has((node as Element).tagName.toLowerCase())
+        if (!isInsideSectioning) {
+          removeElement(child)
+          continue
+        }
       }
     }
     // Recurse into remaining children
@@ -403,8 +508,14 @@ function stripChrome(doc: Document): void {
     findElements(doc, (el) => (el.attribs.role || '').toLowerCase() === 'main')[0] || null
 
   if (mainEl) {
-    // main exists — chrome is already stripped, we're good
-    return
+    // main exists — but check if it has meaningful text content
+    // RSC streaming pages and SPAs may have an empty <main> shell
+    const mainText = textContent(mainEl).trim()
+    if (mainText.length > 50) {
+      // main has real content — chrome is already stripped, we're good
+      return
+    }
+    // main is empty or near-empty — fall through to findCoreContent()
   }
 
   // No main — try fallback content identification
@@ -862,6 +973,9 @@ export function wwwaxe(html: string, options: WwwaxeOptions = {}): string {
 
   // 2. Extract frontmatter from <head> (before processNode strips attributes)
   const frontmatterData = extractFrontmatter(doc)
+
+  // 2.5. Reassemble RSC streaming payloads (before processNode strips hidden elements and templates)
+  reassembleRSCPayloads(doc)
 
   // 3. Process all top-level nodes (existing cleanup)
   const children = [...getChildren(doc)]
