@@ -1,17 +1,19 @@
 # wwwaxe 🪓
 
-Strip non-content data from HTML for agentic consumption.
+Strip HTML down to clean, token-efficient content for AI agents.
 
-Modern web pages are bloated with scripts, styles, tracking pixels, and presentational markup that waste tokens when fed to LLMs. **wwwaxe** strips all of that away while preserving the meaningful document structure that plain-text or markdown conversion loses.
+Modern web pages are bloated with scripts, styles, tracking pixels, and presentational markup that waste tokens when fed to LLMs. **wwwaxe** strips all of that away and outputs clean markdown-flavored text with YAML frontmatter — ready for an agent to read.
 
 ## Why not just convert to markdown?
 
-Page structure often contains meaningful context — navigation hierarchies, semantic groupings, form layouts, table structures — that markdown conversion flattens or discards. wwwaxe keeps the HTML skeleton intact so agents can reason about page structure, not just content.
+Generic HTML-to-markdown converters work on the full page — nav, footer, cookie banners, sidebar ads, and all. wwwaxe understands page structure. With `core: true` it isolates the main content using ARIA landmarks and semantic heuristics before converting, so you get the article, not the chrome.
+
+Page structure also carries meaning that flat markdown loses — table relationships, form layouts, semantic groupings. wwwaxe keeps the structural skeleton while eliminating the noise.
 
 ## Install
 
 ```bash
-npm install wwwaxe
+npm install simen/wwwaxe
 ```
 
 ## Usage
@@ -19,84 +21,89 @@ npm install wwwaxe
 ```typescript
 import { wwwaxe } from 'wwwaxe'
 
-const condensed = wwwaxe(rawHtml)
-// Returns condensed HTML with only content-bearing elements and attributes
+// Default: strips noise, converts to markdown, keeps ids
+const result = wwwaxe(rawHtml)
+
+// Core mode: also strips nav/header/footer, isolates main content
+const result = wwwaxe(rawHtml, { core: true })
 ```
 
-## What it strips (v0)
+### Example output
 
-- **`<script>`** tags and contents
-- **`<style>`** tags and contents
-- **`<noscript>`** tags and contents
-- **`<svg>`** tags and contents (inline SVGs are typically decorative)
-- **All `style` attributes**
-- **All `class` attributes**
-- **All `id` attributes**
-- **All `data-*` attributes**
-- **All event handler attributes** (`onclick`, `onload`, etc.)
-- **Hidden elements** (`hidden`, `aria-hidden="true"`)
-- **Comments**
-- **Empty elements** that have no text content or meaningful children
-- **Excessive whitespace** — collapses runs of whitespace
+Given a typical blog page, wwwaxe produces:
 
-## What it keeps
+```
+---
+title: "Hello World"
+description: "A great article about things"
+url: "https://example.com/blog/hello-world"
+image: "https://example.com/og/hello-world.jpg"
+---
 
-- **Document structure** — headings, sections, articles, nav, main, aside, etc.
-- **Text content** — all visible text
-- **Links** — `<a href="...">` with their href
-- **Images** — `<img src="..." alt="...">` with src and alt
-- **Tables** — full table structure
-- **Forms** — form structure with labels, inputs (type, name, placeholder, value)
-- **Lists** — ordered and unordered lists
-- **Semantic attributes** — `role`, `aria-label`, `alt`, `title`, `lang`, `dir`
-- **Meta information** — `<title>`, `<meta name="description">`, `<meta property="og:*">`
+## Hello World
 
-## Example
+This is my [blog post](/post).
 
-Input (~50KB typical page):
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <title>My Blog Post</title>
-  <meta name="description" content="A great article">
-  <link rel="stylesheet" href="/styles.css">
-  <script src="/analytics.js"></script>
-  <style>.hero { background: blue; }</style>
-</head>
-<body class="dark-theme" data-page="blog" onclick="track()">
-  <nav id="main-nav" class="sticky-nav bg-white shadow-md">
-    <a href="/" class="logo text-xl font-bold">My Site</a>
-    <a href="/about" class="nav-link text-gray-600 hover:text-black">About</a>
-  </nav>
-  <main class="container mx-auto px-4">
-    <article class="prose lg:prose-xl">
-      <h1 class="text-4xl font-bold mb-4">Hello World</h1>
-      <p class="text-gray-700 leading-relaxed">This is my <a href="/post" class="text-blue-500 underline">blog post</a>.</p>
-      <img src="/photo.jpg" alt="A photo" class="rounded-lg shadow" loading="lazy" width="800" height="600">
-    </article>
-  </main>
-  <script>console.log('tracking')</script>
-</body>
-</html>
+![A photo](/photo.jpg)
+
+- First item
+- Second item
+- Third item
 ```
 
-Output (~500 bytes):
-```html
-<html lang="en"><head><title>My Blog Post</title><meta name="description" content="A great article"></head><body><nav><a href="/">My Site</a> <a href="/about">About</a></nav><main><article><h1>Hello World</h1><p>This is my <a href="/post">blog post</a>.</p><img src="/photo.jpg" alt="A photo"></article></main></body></html>
-```
+No `<script>`, no `class="text-gray-700 leading-relaxed"`, no `data-*` noise. Just content.
 
-## API
+## What it does
 
-### `wwwaxe(html: string, options?: WwwaxeOptions): string`
+**Removes entirely:**
+- `<script>`, `<style>`, `<noscript>`, `<svg>`, `<link>`, `<iframe>`, `<template>` tags and their contents
+- All `class`, `style`, `data-*`, and event handler attributes (`onclick`, `onload`, etc.)
+- Hidden elements (`hidden`, `aria-hidden="true"`)
+- HTML comments
+- Empty elements with no text content or meaningful children
+- Excessive whitespace
 
-- **html** — Raw HTML string
-- **options.keepDataAttributes** — Keep `data-*` attributes (default: `false`)
-- **options.keepIds** — Keep `id` attributes (default: `false`)
-- **options.keepClasses** — Keep `class` attributes (default: `false`)
-- **options.keepAriaHidden** — Keep `aria-hidden` elements (default: `false`)
+**Keeps and converts:**
+- `<head>` → YAML frontmatter with `title`, `description`, `url` (canonical), and `og:image`
+- Headings → `## Heading` markdown syntax
+- Links → `[text](href)` markdown syntax
+- Images → `![alt](src)` markdown syntax
+- Lists → `- item` / `1. item` markdown syntax
+- Bold/italic/code → `**bold**`, `*italic*`, `` `code` `` markdown syntax
+- Tables, forms, and other structural elements — kept as clean HTML with only semantic attributes
+- `id` attributes — preserved (useful for anchor links and agent navigation)
+- Semantic attributes — `role`, `aria-label`, `alt`, `title`, `lang`, `dir`
 
-Returns condensed HTML string.
+## Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `markdown` | `boolean` | `true` | Convert headings, links, images, lists, bold, italic, code to markdown syntax |
+| `core` | `boolean` | `false` | Strip chrome (header, nav, footer, aside, dialog) and isolate main content |
+| `keepIds` | `boolean` | `true` | Keep `id` attributes |
+| `keepClasses` | `boolean` | `false` | Keep `class` attributes |
+| `keepDataAttributes` | `boolean` | `false` | Keep `data-*` attributes |
+| `keepAriaHidden` | `boolean` | `false` | Keep `aria-hidden="true"` elements |
+
+## Core mode
+
+With `core: true`, wwwaxe strips page chrome and isolates the main content before processing. The content identification chain:
+
+1. **ARIA landmarks** — looks for `<main>`, or elements with `role="main"`
+2. **Empty main fallback** — if `<main>` exists but has less than 50 characters of text content, falls through to the next step (handles skeleton-rendered pages)
+3. **`<article>`** — first article element
+4. **Skip link target** — follows `href` of a "skip to content" link to find the target element
+5. **Well-known IDs** — looks for `#main-content`, `#content`, `#main`, `#page-content`, `#site-content`
+
+Chrome elements removed in core mode: `<header>`, `<nav>`, `<footer>`, `<aside>`, `<dialog>`.
+
+**Note:** `<header>` elements *inside* a `<section>` or `<article>` are preserved — they're content headers, not page chrome.
+
+## RSC streaming reassembly
+
+React Server Components pages often stream content as a series of `<div hidden id="S:N">` elements that are injected into the DOM by a small inline script. When the page is fetched as static HTML (before JavaScript runs), the visible `<main>` is empty and all the real content sits in those hidden divs.
+
+wwwaxe automatically detects this pattern and reassembles the streamed fragments into `<main>` before processing. No configuration needed — if the page looks like an RSC streaming page, it's handled transparently.
 
 ## License
 
