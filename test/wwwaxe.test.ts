@@ -733,4 +733,118 @@ describe('wwwaxe', () => {
       expect(result).toContain('blog post')
     })
   })
+
+  describe('data URI stripping', () => {
+    const bigDataUri = 'data:image/png;base64,' + 'A'.repeat(100000)
+    const smallDataUri = 'data:image/svg+xml;base64,PHN2Zz4='
+
+    it('strips data URI from img src in structural mode', () => {
+      const html = '<html><body><img src="' + bigDataUri + '" alt="photo"></body></html>'
+      const result = wwwaxe(html, { markdown: false })
+      expect(result).not.toContain('data:image')
+      expect(result).not.toContain('AAAA')
+      // The img tag should be gone or have no src
+      expect(result.length).toBeLessThan(500)
+    })
+
+    it('strips data URI from img src in markdown mode', () => {
+      const html = '<html><body><img src="' + bigDataUri + '" alt="A cat"></body></html>'
+      const result = wwwaxe(html)
+      expect(result).not.toContain('data:image')
+      expect(result).not.toContain('AAAA')
+      // Should preserve alt text as fallback
+      expect(result).toContain('A cat')
+      expect(result.length).toBeLessThan(500)
+    })
+
+    it('strips small data URIs too (SVG placeholders)', () => {
+      const html = '<html><body><img src="' + smallDataUri + '" alt="icon"></body></html>'
+      const result = wwwaxe(html)
+      expect(result).not.toContain('data:image')
+      expect(result).toContain('icon')
+    })
+
+    it('preserves normal image URLs', () => {
+      const html = '<html><body><img src="https://example.com/photo.jpg" alt="photo"></body></html>'
+      const result = wwwaxe(html)
+      expect(result).toContain('https://example.com/photo.jpg')
+      expect(result).toContain('photo')
+    })
+
+    it('removes img with data URI and no alt text in markdown mode', () => {
+      const html = '<html><body><p>Text</p><img src="' + bigDataUri + '"><p>More</p></body></html>'
+      const result = wwwaxe(html)
+      expect(result).not.toContain('data:image')
+      expect(result).toContain('Text')
+      expect(result).toContain('More')
+    })
+
+    it('strips data URIs from srcset', () => {
+      const html = '<html><body><img srcset="' + smallDataUri + ' 1x, https://example.com/photo.jpg 2x" alt="photo"></body></html>'
+      const result = wwwaxe(html, { markdown: false })
+      expect(result).not.toContain('data:image')
+      expect(result).toContain('https://example.com/photo.jpg')
+    })
+
+    it('strips data URIs from poster attribute', () => {
+      const html = '<html><body><video poster="' + bigDataUri + '"><source src="video.mp4"></video></body></html>'
+      const result = wwwaxe(html, { markdown: false })
+      expect(result).not.toContain('data:image')
+      expect(result).not.toContain('AAAA')
+    })
+
+    it('strips data URI from og:image in frontmatter', () => {
+      const html = '<html><head><meta property="og:image" content="' + bigDataUri + '"><title>Test</title></head><body><p>Content</p></body></html>'
+      const result = wwwaxe(html)
+      expect(result).not.toContain('data:image')
+      expect(result).toContain('title: Test')
+      // Should NOT have image in frontmatter
+      expect(result).not.toContain('image:')
+    })
+
+    it('preserves normal og:image URL in frontmatter', () => {
+      const html = '<html><head><meta property="og:image" content="https://example.com/og.jpg"><title>Test</title></head><body><p>Content</p></body></html>'
+      const result = wwwaxe(html)
+      expect(result).toContain('image: https://example.com/og.jpg')
+    })
+
+    it('handles multiple images mixing data URIs and real URLs', () => {
+      const html = '<html><body>' +
+        '<img src="' + bigDataUri + '" alt="placeholder">' +
+        '<img src="https://example.com/real.jpg" alt="real">' +
+        '<img src="' + smallDataUri + '" alt="icon">' +
+        '</body></html>'
+      const result = wwwaxe(html)
+      expect(result).not.toContain('data:image')
+      expect(result).toContain('https://example.com/real.jpg')
+      expect(result).toContain('placeholder')
+      expect(result).toContain('real')
+      expect(result).toContain('icon')
+    })
+
+    it('handles data URI with whitespace prefix', () => {
+      const html = '<html><body><img src="  data:image/png;base64,AAAA" alt="test"></body></html>'
+      const result = wwwaxe(html)
+      expect(result).not.toContain('data:image')
+      expect(result).toContain('test')
+    })
+
+    it('dramatically reduces output size when data URIs are present', () => {
+      // Simulate a Google-like page with many inline base64 images
+      const images = Array.from({ length: 10 }, (_, i) =>
+        '<img src="data:image/png;base64,' + 'B'.repeat(50000) + '" alt="img' + i + '">'
+      ).join('')
+      const html = '<html><body><main><h1>Search Results</h1>' + images + '<p>Footer</p></main></body></html>'
+      
+      const inputSize = html.length
+      const result = wwwaxe(html)
+      const outputSize = result.length
+      
+      // Input is ~500KB, output should be tiny
+      expect(inputSize).toBeGreaterThan(400000)
+      expect(outputSize).toBeLessThan(1000)
+      expect(result).toContain('Search Results')
+      expect(result).not.toContain('BBBB')
+    })
+  })
 })

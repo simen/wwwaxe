@@ -249,7 +249,9 @@ function extractFrontmatter(doc: Document): FrontmatterData {
   for (const meta of metas) {
     const property = (meta.attribs.property || '').toLowerCase()
     if (property === 'og:image' && meta.attribs.content) {
-      data.image = meta.attribs.content.trim()
+      const imgContent = meta.attribs.content.trim()
+      // Skip data URIs in og:image — they can be huge
+      if (!imgContent.startsWith('data:')) data.image = imgContent
       break
     }
   }
@@ -594,6 +596,21 @@ function stripAttributes(el: Element, options: WwwaxeOptions): void {
 
     // Keep if in allowlist
     if (CONTENT_ATTRIBUTES.has(lowerKey)) {
+      // Strip data URIs from src-like attributes — they can be 250KB+ of base64
+      if ((lowerKey === 'src' || lowerKey === 'poster') && value.trimStart().startsWith('data:')) {
+        continue
+      }
+      if (lowerKey === 'srcset') {
+        // srcset can have multiple entries — strip any that are data URIs
+        const cleaned = value.split(',')
+          .map(s => s.trim())
+          .filter(s => !s.startsWith('data:'))
+          .join(', ')
+        if (cleaned) {
+          newAttribs[key] = cleaned
+        }
+        continue
+      }
       newAttribs[key] = value
     }
   }
@@ -854,7 +871,16 @@ function markdownRewrite(node: Node): void {
     case 'img': {
       const src = el.attribs.src || ''
       const alt = el.attribs.alt || ''
-      replaceWithText(el, '![' + alt + '](' + src + ')')
+      // Skip images with data URIs — they can be 250KB+ of base64
+      if (src.trimStart().startsWith('data:')) {
+        if (alt) {
+          replaceWithText(el, '[image: ' + alt + ']')
+        } else {
+          removeElement(el)
+        }
+      } else {
+        replaceWithText(el, '![' + alt + '](' + src + ')')
+      }
       break
     }
     case 'code': {
